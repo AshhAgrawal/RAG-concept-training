@@ -45,7 +45,7 @@ def load_chunks():
 
 def save_index(chunks, embeddings, model):
     """Save vectors and their matching text; publish config last as a manifest."""
-    expected_shape = (len(chunks), model.get_sentence_embedding_dimension())
+    expected_shape = (len(chunks), model.get_embedding_dimension())
     if embeddings.shape != expected_shape or not np.isfinite(embeddings).all():
         raise ValueError(f"Invalid embedding matrix: {embeddings.shape}; expected {expected_shape}.")
     if not np.allclose(np.linalg.norm(embeddings, axis=1), 1.0, atol=1e-5):
