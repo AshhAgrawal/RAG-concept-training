@@ -4,7 +4,7 @@
 
 A learning project that extracts resume PDFs, splits them into sections and chunks, creates local embeddings, and retrieves passages using semantic search plus BM25 keyword search.
 
-**Current scope:** retrieval with source references. Groq answer generation is planned but not implemented. The current dataset contains six resumes and 54 chunks, represented by a `(54, 384)` embedding matrix. These counts change when documents are rebuilt.
+**Current scope:** local retrieval with source references plus Groq answer generation. The local and mocked-request checks pass; live answer evaluation requires a configured Groq API key. The current dataset contains six resumes and 54 chunks, represented by a `(54, 384)` embedding matrix. These counts change when documents are rebuilt.
 
 ## Run a search
 
@@ -184,7 +184,7 @@ Source: Ashutosh_Agrawal_Resume.pdf | pages: 1 | b6f733d8c461:s4:c1
 
 ## Files and responsibilities
 
-| File | Responsibility |
+| File | Responsibility | 
 | --- | --- |
 | [extract_resumes.py](extract_resumes.py) | PDF text extraction with page tracking |
 | [chunk_resumes.py](chunk_resumes.py) | Heading rules, token budgets, overlap, and source metadata |
@@ -211,7 +211,7 @@ python chunk_resumes.py
 python embed_resumes.py
 ```
 
-Dependency and model downloads require network access. Text processing and embedding computation run locally; no resume text is uploaded. Search uses only cached model files. Groq and FAISS are not used in this implementation.
+Dependency and model downloads require network access. Text processing and embedding computation run locally; no resume text is uploaded. Search uses only cached model files. FAISS is not used. The separate ask_resumes.py command sends selected text and the question to Groq; search_resumes.py stays local.
 
 When PDFs change, rerun extraction, chunking, and embedding in order. For deleted or renamed PDFs, also remove their old generated files from `data/extracted/` and `data/chunked/` before rebuilding. Automatic synchronization is not implemented. Index files and resume data are excluded from version control.
 
@@ -226,10 +226,30 @@ Nine focused search tests passed. The comparison report is written to `data/eval
 
 Twilio and Con Edison ranked first in both methods. Some paraphrases did not improve; one labeled supporting passage moved from second to third. The employer-list question retrieved only one of three labeled employer passages in the top three with either method.
 
-Remaining limitations include PDF spacing errors, overlapping evidence, chunks splitting job entries, no automatic name resolution from questions, and incomplete coverage for exhaustive questions. The lexical tokenizer is English-oriented and does not expand synonyms or fix OCR. Hybrid search can still return irrelevant passages, including contact headers, and cannot reliably reject unsupported questions. A future generation stage will need evidence checks and source citations; it is not implemented yet.
+Remaining limitations include PDF spacing errors, overlapping evidence, chunks splitting job entries, no automatic name resolution from questions, and incomplete coverage for exhaustive questions. The lexical tokenizer is English-oriented and does not expand synonyms or fix OCR. Hybrid search can still return irrelevant passages, including contact headers, and cannot reliably reject unsupported questions. The generation stage checks citation IDs and response structure, but semantic grounding still requires live evaluation.
 
 ## References
 
 - [MiniLM model documentation](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)
 - [BM25 Python library](https://github.com/dorianbrown/rank_bm25)
 - [Reciprocal Rank Fusion explanation](https://learn.microsoft.com/en-us/azure/search/hybrid-search-ranking)
+
+
+## Answer generation: iteration 6
+
+API-key setup and run commands are in [ITERATION_6.md](ITERATION_6.md). Put the real key only in the local `.env` file. `--dry-run` previews the prompt without a Groq call.
+
+```mermaid
+flowchart TB
+    CLI["ask_resumes.main()<br/>Question and candidate/section filters"] --> Env["load_dotenv()<br/>Read GROQ_API_KEY and GROQ_MODEL"]
+    Env --> Retrieval["retrieve_sources()<br/>Local hybrid retrieval using saved embeddings"]
+    Retrieval --> Sources["Label selected passages S1, S2, ...<br/>Keep filenames and page references"]
+    Sources --> Prompt["build_messages()<br/>Grounding instructions + question + passage text"]
+    Prompt --> Dry{"Dry run?"}
+    Dry -->|Yes| Preview["Print prompt locally<br/>No API call"]
+    Dry -->|No| Groq["generate_answer()<br/>Groq chat.completions.create()<br/>Question and selected sources sent externally"]
+    Groq --> Check["validate_answer()<br/>Check JSON shape and cited source IDs"]
+    Check --> Render["render_answer()<br/>Supported statements with source markers<br/>Or insufficient-evidence response"]
+```
+
+Only the question and selected readable sources are sent to Groq; vectors stay local. The API returns structured statements and source IDs. The application resolves citation filenames and pages from its own metadata, rejecting unknown IDs and incomplete responses. These checks do not prove that the statements are supported by the cited text. Prompting requests insufficient-evidence handling, but live evaluation remains necessary.
