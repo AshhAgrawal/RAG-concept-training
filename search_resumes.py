@@ -1,4 +1,4 @@
-"""Iteration 4: retrieve resume passages for a question, without calling an LLM."""
+"""Retrieve resume passages using semantic, keyword, or hybrid search locally."""
 
 import argparse
 import hashlib
@@ -6,6 +6,7 @@ import json
 
 # Reuse the same project paths and model library as the embedding pipeline.
 from embed_resumes import INDEX_DIR, MODEL_CACHE, MODEL_NAME, SentenceTransformer, np
+from hybrid_retrieval import rank_chunks, retrieve
 
 
 def load_index(index_dir=INDEX_DIR):
@@ -62,30 +63,14 @@ def select_rows(chunks, candidate=None, section=None):
     return np.array(rows, dtype=np.int64)
 
 
-def rank_chunks(embeddings, query_embedding, rows, top_k):
-    """Return original row IDs and cosine scores, highest score first."""
-    if top_k < 1:
-        raise ValueError("--top-k must be at least 1.")
-    if query_embedding.shape != (embeddings.shape[1],) or not np.isfinite(query_embedding).all():
-        raise ValueError("Question embedding has invalid dimensions or values.")
-    if not np.isclose(np.linalg.norm(query_embedding), 1.0, atol=1e-5):
-        raise ValueError("Question embedding must be normalized.")
-
-    # KEY STEP: @ computes a dot product with every eligible chunk vector.
-    # Because both sides have unit length, these are cosine similarity scores.
-    scores = embeddings[rows] @ query_embedding
-
-    # argsort returns positions WITHIN the filtered set, not original index rows.
-    best_positions = np.argsort(-scores, kind="stable")[:top_k]
-    return [(int(rows[position]), float(scores[position])) for position in best_positions]
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("question", help="Question in quotation marks.")
     parser.add_argument("--candidate", help="Full name or an unambiguous part of a name.")
     parser.add_argument("--section", help="Optional section label, e.g. experience or skills.")
     parser.add_argument("--top-k", type=int, default=3, help="Maximum passages to show (default: 3).")
+    parser.add_argument("--mode", choices=["hybrid", "semantic", "keyword"], default="hybrid",
+                        help="Ranking method (default: hybrid = semantic + BM25 with RRF).")
     args = parser.parse_args()
     if not args.question.strip():
         parser.error("Question cannot be empty.")
@@ -96,7 +81,7 @@ def main():
     embeddings, chunks, config = load_index()
     section = args.section.strip().lower() if args.section is not None else None
     rows = select_rows(chunks, args.candidate, section)
-    print(f"Searching {len(rows)} of {len(chunks)} chunks using the cached model.", flush=True)
+    print(f"Searching {len(rows)} of {len(chunks)} chunks | mode={args.mode}.", flush=True)
 
     # STEP 2: Load the SAME model revision that created the saved vectors.
     # Indexing already downloaded it, so search works locally without network access.
@@ -106,29 +91,43 @@ def main():
         device="cpu",
         cache_folder=str(MODEL_CACHE),
         local_files_only=True,
-    )
-    if model.get_embedding_dimension() != config["dimensions"]:
+    ) if args.mode != "keyword" else None
+    if model is not None and model.get_embedding_dimension() != config["dimensions"]:
         raise ValueError("Loaded model dimensions differ from the saved index.")
-    tokens = model.tokenizer(args.question, truncation=False)["input_ids"]
-    if len(tokens) > model.max_seq_length:
+    tokens = model.tokenizer(args.question, truncation=False)["input_ids"] if model else []
+    if model is not None and len(tokens) > model.max_seq_length:
         raise ValueError(f"Question is too long; shorten it to at most {model.max_seq_length} tokens.")
 
     # STEP 3: Embed ONLY the question, with the same normalization as the chunks.
     query_embedding = model.encode(
         args.question, normalize_embeddings=True, convert_to_numpy=True,
         show_progress_bar=False,
-    )
+    ) if model is not None else None
 
-    # STEP 4: Rank eligible chunks by similarity to that question vector.
-    results = rank_chunks(embeddings, query_embedding, rows, args.top_k)
+    # STEP 4: BM25 matches words; semantic search matches meaning. RRF combines
+    # their ranks, not their incompatible raw scores. Filters apply to BOTH.
+    results = retrieve(embeddings, query_embedding, chunks, rows, args.question,
+                       args.top_k, args.mode, candidate_filtered=args.candidate is not None)
 
     # STEP 5: Use returned row IDs to print original text and source references.
-    print("\nRetrieved passages (similarity scores are not confidence percentages).")
+    print("\nRetrieved passages (RRF, cosine, and BM25 are ranking scores, not confidence).")
     print("Top matches may not answer the question or cover every relevant fact.\n")
-    for rank, (row, score) in enumerate(results, start=1):
+    if not results:
+        print("No keyword matches in the selected chunks. This does not prove the answer is absent.")
+    for rank, result in enumerate(results, start=1):
+        row = result["row"]
         chunk = chunks[row]
         pages = ", ".join(str(page) for page in chunk["page_numbers"])
-        print(f"{rank}. {chunk['candidate_name']} | {chunk['section']} | score={score:.3f}")
+        scores = []
+        if result["rrf"] is not None:
+            scores.append(f"RRF={result['rrf']:.5f}")
+        if result["cosine"] is not None:
+            scores.append(f"cosine={result['cosine']:.3f}")
+        if args.mode != "semantic":
+            scores.append(f"BM25={result['bm25']:.3f}")
+        print(f"{rank}. {chunk['candidate_name']} | {chunk['section']} | {' | '.join(scores)}")
+        if args.mode != "semantic":
+            print(f"Keyword matches: {', '.join(result['matched_terms']) or '(none; semantic match only)'}")
         print(f"Source: {chunk['source_file']} | pages: {pages} | {chunk['chunk_id']}")
         print(chunk["text"])
         print()

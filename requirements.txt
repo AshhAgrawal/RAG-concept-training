@@ -2,3 +2,4 @@ pypdf==6.18.1
 tokenizers==0.23.2
 sentence-transformers==6.0.1
 numpy==2.5.3
+rank-bm25==0.2.2

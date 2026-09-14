@@ -1,5 +1,7 @@
 # Iteration 4: search the saved resume embeddings
 
+Update: iteration 5 adds hybrid search as the default. Use `--mode semantic` to reproduce this iteration's original ranking. See `ITERATION_5.md` for BM25 and rank fusion.
+
 Run from the project folder:
 
 ```bash
